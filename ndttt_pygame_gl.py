@@ -19,24 +19,43 @@ def strides(n, d):
 def index_of(coord, s):
     return sum(ci*si for ci, si in zip(coord, s))
 
-def gen_canonical_dirs(d):
+def gen_canonical_dirs_signed(d):
+    """All v in {-1,0,1}^d \\ {0}, canonicalized so the first nonzero is +1."""
     V = []
-    for mask in range(1, 1 << d):
-        v = [(mask >> i) & 1 for i in range(d)]
-        V.append(v)
-    return V
+    def first_nonzero_sign(v):
+        for x in v:
+            if x != 0: return 1 if x > 0 else -1
+        return 0
+    # iterate all 3^d vectors
+    def rec(i, cur):
+        if i == d:
+            if any(cur) and first_nonzero_sign(cur) == 1:
+                V.append(cur[:])
+            return
+        for t in (-1, 0, 1):
+            cur.append(t)
+            rec(i+1, cur)
+            cur.pop()
+    rec(0, [])
+    return V  # size = (3^d - 1)/2
 
 def gen_lines(n, d, w):
     s = strides(n, d)
-    V = gen_canonical_dirs(d)
+    V = gen_canonical_dirs_signed(d)   # <-- use signed directions
     N = n**d
     cell_to_lines = [[] for _ in range(N)]
     line_indices = []
-    from itertools import product
+
     for v in V:
+        # start ranges depend on step sign
         ranges = []
-        for i, vi in enumerate(v):
-            ranges.append(range(0, n - w + 1) if vi == 1 else range(0, n))
+        for vi in v:
+            if vi == +1:
+                ranges.append(range(0, n - w + 1))
+            elif vi == 0:
+                ranges.append(range(0, n))
+            else:  # vi == -1
+                ranges.append(range(w - 1, n))
         for start in product(*ranges):
             cells = []
             p = list(start)
@@ -48,13 +67,17 @@ def gen_lines(n, d, w):
             line_indices.append(cells)
             for idx in cells:
                 cell_to_lines[idx].append(lid)
+
+    # convert to bitmasks
     line_masks = []
     for cells in line_indices:
         m = 0
         for idx in cells:
             m |= (1 << idx)
         line_masks.append(m)
+
     return line_masks, cell_to_lines, s
+
 
 class Zobrist:
     def __init__(self, cells, players=2, seed=0xC0FFEE):
@@ -355,7 +378,6 @@ def main():
     gl_init(W, H)
     rng = Random(1337)
     game = NDTTT(n=n, d=d, w=w)
-
     # text
     text = GLText(pt=16)  # or your preferred size/color
 
