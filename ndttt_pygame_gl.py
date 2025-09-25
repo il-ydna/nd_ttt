@@ -279,6 +279,68 @@ def draw_slice_planes(n, spacing, sel_x, sel_y, sel_z, emphasis=1.0):
     glDepthMask(GL_TRUE)
     glPopAttrib()
 
+# --- replace your GLText with this drop-in ---
+class GLText:
+    """Cache text → OpenGL texture, draw in screen-space (orthographic)."""
+    def __init__(self, font_name="consolas,menlo,monospace", pt=16, color=(220,220,230)):
+        pygame.font.init()
+        self.font = pygame.font.SysFont(font_name, pt)
+        self.default_color = color
+        self.cache = {}  # (text, color_tuple) -> (tex_id, w, h)
+
+    def _upload_surface(self, surf):
+        w, h = surf.get_size()
+        surf = surf.convert_alpha()
+        px = pygame.image.tostring(surf, "RGBA", True)
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        return tex_id, w, h
+
+    def get(self, text: str, color=None):
+        color = color or self.default_color  # pygame expects 0–255 ints
+        key = (text, color)
+        if key in self.cache:
+            return self.cache[key]
+        surf = self.font.render(text, True, color)
+        tex = self._upload_surface(surf)
+        self.cache[key] = tex
+        return tex
+
+    def draw(self, text: str, x: int, y: int, window_w: int, window_h: int, color=None):
+        tex_id, w, h = self.get(text, color=color)
+        glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_TEXTURE_BIT | GL_DEPTH_BUFFER_BIT)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glEnable(GL_TEXTURE_2D)
+        glColor4f(1, 1, 1, 1)
+
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+        glOrtho(0, window_w, window_h, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 1); glVertex2f(x,   y)
+        glTexCoord2f(1, 1); glVertex2f(x+w, y)
+        glTexCoord2f(1, 0); glVertex2f(x+w, y+h)
+        glTexCoord2f(0, 0); glVertex2f(x,   y+h)
+        glEnd()
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+        glMatrixMode(GL_MODELVIEW); glPopMatrix()
+        glMatrixMode(GL_PROJECTION); glPopMatrix()
+        glPopAttrib()
+        return w, h  # handy if you want to align boxes next to text
+
 
 
 # -- main with 2×2 viewports for w=0..3 and WASD+arrow x/y, A/D z, W/S w
@@ -288,11 +350,15 @@ def main():
     pygame.init()
     W, H = 1280, 900
     pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL)
-    pygame.display.set_caption("4D Tic-Tac-Toe — 4 viewports (w=0..3), WASD+Arrows for x/y, A/D z, W/S w")
+    pygame.display.set_caption("4D Tic-Tac-Toe — 4 viewports (w=0..3)")
 
     gl_init(W, H)
     rng = Random(1337)
     game = NDTTT(n=n, d=d, w=w)
+
+    # text
+    text = GLText(pt=16)  # or your preferred size/color
+
 
     # camera
     yaw, pitch, radius = 45.0, 25.0, 18.0
@@ -403,6 +469,85 @@ def main():
         # draw the compass gizmo on top-left of the whole window
         # bottom-left coords for OpenGL viewport: (x, y_from_bottom)
         draw_compass(COMP_MARGIN, H - (COMP_MARGIN + COMP_SIZE), COMP_SIZE, yaw, pitch)
+
+        help_lines = [
+            "←/→: x-/+   |   ↑/↓: y-/+   |   A/D: z−/+   |   W/S: w−/+",
+            "Enter: place   Space: random   U: undo   R: reset   ESC: quit",
+        ]
+
+        margin, y = 30, 20
+        glViewport(0, 0, W, H)
+        for line in help_lines:
+            tex_id, w, h = text.get(line)   # get cached texture and its size
+            x = W - w - margin              # right align
+            text.draw(line, x, y, W, H)
+            y += 20
+
+        # --- bottom-left HUD (after your top-right help text) ---
+        # choose player color (0–255 ints for font; GL quad uses 0–1 floats)
+        P0_FONT = (38, 141, 255)   # blue-ish for X
+        P1_FONT = (230, 64, 64)    # red-ish for O
+        P0_GL   = (0.15, 0.55, 1.0)
+        P1_GL   = (0.90, 0.25, 0.25)
+
+        turn = 'X' if game.stm == 0 else 'O'
+        font_color = P0_FONT if game.stm == 0 else P1_FONT
+        chip_color = P0_GL   if game.stm == 0 else P1_GL
+
+        cursor_line = f"Turn: {turn}   Cursor (x,y,z,w) = ({sel_x},{sel_y},{sel_z},{sel_w})"
+
+        # bottom-left anchor
+        margin_x = 30
+        margin_y = 30
+        # measure text to position chip nicely
+        tex_w, tex_h = text.get(cursor_line, color=font_color)[1:3]
+        x = margin_x
+        y = H - margin_y - tex_h
+
+        # draw colored chip box to the left of the text
+        glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+        glOrtho(0, W, H, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+
+        chip_w = 14; chip_h = tex_h - 4
+        glColor4f(*chip_color, 1.0)
+        glBegin(GL_QUADS)
+        glVertex2f(x,           y+2)
+        glVertex2f(x+chip_w,    y+2)
+        glVertex2f(x+chip_w,    y+2+chip_h)
+        glVertex2f(x,           y+2+chip_h)
+        glEnd()
+
+        glMatrixMode(GL_MODELVIEW); glPopMatrix()
+        glMatrixMode(GL_PROJECTION); glPopMatrix()
+        glPopAttrib()
+
+        # draw the text itself, a little to the right of the chip
+        text.draw(cursor_line, x + chip_w + 8, y, W, H, color=font_color)
+
+        # --- bottom-right mini status (no backdrop) ---
+        br_lines = [
+            f"Active w slice: {sel_w}",
+            "Click compass to reset view",
+            "Made by Andy Li"
+        ]
+
+        margin_x, margin_y = 24, 24
+        y = H - margin_y
+
+        # Draw each line upward from the bottom, right-aligned
+        for s in reversed(br_lines):
+            tex_id, w_txt, h_txt = text.get(s)
+            x = W - margin_x - w_txt
+            y -= h_txt
+            text.draw(s, x, y, W, H)
+            y -= 6  # small gap between lines
 
 
         pygame.display.flip()
